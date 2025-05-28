@@ -165,23 +165,31 @@ get_system_info() {
     echo
 }
 
-# 获取总流量 - 改为显示网络接口流量
+# 获取总流量 - 使用简单的数学计算
 get_total_traffic() {
     # 尝试从系统网络接口获取流量信息
     if [ -f /proc/net/dev ]; then
-        # 获取主网络接口的流量
-        local rx_bytes=$(awk '/eth0|ens|enp|wlan/ {rx+=$2} END {print rx+0}' /proc/net/dev)
-        local tx_bytes=$(awk '/eth0|ens|enp|wlan/ {tx+=$10} END {print tx+0}' /proc/net/dev)
+        # 获取所有网络接口的流量（排除lo回环接口）
+        local rx_bytes=$(awk '!/lo:/ && /:/ {rx+=$2} END {print rx+0}' /proc/net/dev 2>/dev/null || echo "0")
+        local tx_bytes=$(awk '!/lo:/ && /:/ {tx+=$10} END {print tx+0}' /proc/net/dev 2>/dev/null || echo "0")
         local total_bytes=$((rx_bytes + tx_bytes))
         
+        # 使用shell内置的数学运算，避免bc依赖
         if [ "$total_bytes" -gt 1073741824 ]; then
-            echo "$(echo "scale=2; $total_bytes/1073741824" | bc 2>/dev/null || echo $((total_bytes/1073741824))) GB"
+            local gb=$((total_bytes / 1073741824))
+            local remainder=$((total_bytes % 1073741824))
+            local decimal=$((remainder * 10 / 1073741824))
+            echo "${gb}.${decimal} GB"
         elif [ "$total_bytes" -gt 1048576 ]; then
-            echo "$(echo "scale=1; $total_bytes/1048576" | bc 2>/dev/null || echo $((total_bytes/1048576))) MB"
+            local mb=$((total_bytes / 1048576))
+            echo "${mb} MB"
         elif [ "$total_bytes" -gt 1024 ]; then
-            echo "$(echo "scale=0; $total_bytes/1024" | bc 2>/dev/null || echo $((total_bytes/1024))) KB"
-        else
+            local kb=$((total_bytes / 1024))
+            echo "${kb} KB"
+        elif [ "$total_bytes" -gt 0 ]; then
             echo "${total_bytes} B"
+        else
+            echo "0 KB"
         fi
     else
         echo "0 KB"
