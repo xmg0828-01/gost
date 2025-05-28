@@ -1,5 +1,5 @@
 #!/bin/bash
-# GOST 增强版管理脚本 v2.1.1 - 修复版本
+# GOST 增强版管理脚本 v2.2.0 - 完整版
 # 一键安装: bash <(curl -sSL https://raw.githubusercontent.com/xmg0828-01/gost/main/gost.sh)
 # 快捷使用: g
 
@@ -8,7 +8,7 @@ Blue_font_prefix="\033[34m" && Font_color_suffix="\033[0m"
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
 Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warning="${Yellow_font_prefix}[警告]${Font_color_suffix}"
-shell_version="2.1.1"
+shell_version="2.2.0"
 ct_new_ver="2.11.5"
 
 gost_conf_path="/etc/gost/config.json"
@@ -16,6 +16,7 @@ raw_conf_path="/etc/gost/rawconf"
 remarks_path="/etc/gost/remarks.txt"
 expires_path="/etc/gost/expires.txt"
 limits_path="/etc/gost/limits.txt"
+traffic_path="/etc/gost/traffic_stats.db"
 
 check_root() {
     [[ $EUID != 0 ]] && echo -e "${Error} 请使用root权限运行此脚本" && exit 1
@@ -42,91 +43,211 @@ setup_traffic_control() {
     echo -e "${Info} 设置流量控制系统..."
     
     if [[ $release == "centos" ]]; then
-        yum install -y iptables bc vnstat >/dev/null 2>&1
+        yum install -y iptables iptables-services conntrack-tools bc >/dev/null 2>&1
+        systemctl enable iptables >/dev/null 2>&1
     else
-        apt-get install -y iptables bc vnstat >/dev/null 2>&1
+        apt-get install -y iptables iptables-persistent conntrack bc >/dev/null 2>&1
     fi
     
-    # 创建更准确的流量监控脚本
+    # 创建精确的流量监控脚本
     cat > /usr/local/bin/gost-traffic-monitor.sh << 'EOF'
 #!/bin/bash
 
 LIMITS_FILE="/etc/gost/limits.txt"
-USAGE_FILE="/etc/gost/usage.log"
+TRAFFIC_DB="/etc/gost/traffic_stats.db"
+LOG_FILE="/var/log/gost-traffic.log"
 
-check_and_limit() {
-    local current_date=$(date +%Y-%m-%d)
+# 初始化流量统计数据库
+init_db() {
+    [ ! -f "$TRAFFIC_DB" ] && echo "# port:total_bytes:reset_date" > "$TRAFFIC_DB"
+}
+
+# 获取端口的实际流量（使用conntrack）
+get_port_real_traffic() {
+    local port=$1
+    local bytes=0
+    
+    # 方法1: 使用conntrack统计实时连接流量
+    if command -v conntrack >/dev/null 2>&1; then
+        # TCP流量
+        local tcp_bytes=$(conntrack -L -p tcp --dport $port 2>/dev/null | \
+            awk '{for(i=1;i<=NF;i++) if($i~/bytes=/) {gsub(/bytes=/,"",$i); sum+=$i}} END {print sum+0}')
+        # UDP流量
+        local udp_bytes=$(conntrack -L -p udp --dport $port 2>/dev/null | \
+            awk '{for(i=1;i<=NF;i++) if($i~/bytes=/) {gsub(/bytes=/,"",$i); sum+=$i}} END {print sum+0}')
+        bytes=$((tcp_bytes + udp_bytes))
+    fi
+    
+    # 方法2: 使用iptables统计（作为备份）
+    if [ "$bytes" -eq 0 ]; then
+        # 确保规则存在
+        iptables -n -L GOST_TRAFFIC -v -x 2>/dev/null | grep -q ":$port" || add_iptables_rules $port
+        
+        local iptables_bytes=$(iptables -n -L GOST_TRAFFIC -v -x 2>/dev/null | \
+            grep -E ":(tcp|udp) dpt:$port" | awk '{sum+=$2} END {print sum+0}')
+        bytes=$iptables_bytes
+    fi
+    
+    echo $bytes
+}
+
+# 添加iptables监控规则
+add_iptables_rules() {
+    local port=$1
+    
+    # 创建GOST_TRAFFIC链
+    iptables -t filter -N GOST_TRAFFIC 2>/dev/null
+    
+    # 确保链被引用
+    iptables -C INPUT -j GOST_TRAFFIC 2>/dev/null || iptables -I INPUT -j GOST_TRAFFIC
+    iptables -C FORWARD -j GOST_TRAFFIC 2>/dev/null || iptables -I FORWARD -j GOST_TRAFFIC
+    iptables -C OUTPUT -j GOST_TRAFFIC 2>/dev/null || iptables -I OUTPUT -j GOST_TRAFFIC
+    
+    # 添加端口监控规则（避免重复）
+    iptables -C GOST_TRAFFIC -p tcp --dport $port 2>/dev/null || \
+        iptables -A GOST_TRAFFIC -p tcp --dport $port
+    iptables -C GOST_TRAFFIC -p udp --dport $port 2>/dev/null || \
+        iptables -A GOST_TRAFFIC -p udp --dport $port
+}
+
+# 更新流量统计
+update_traffic_stats() {
+    local port=$1
+    local current_bytes=$(get_port_real_traffic $port)
+    local today=$(date +%Y-%m-%d)
+    
+    # 读取历史数据
+    local saved_data=$(grep "^$port:" "$TRAFFIC_DB" 2>/dev/null | tail -1)
+    local saved_bytes=0
+    local reset_date=""
+    
+    if [ -n "$saved_data" ]; then
+        saved_bytes=$(echo "$saved_data" | cut -d: -f2)
+        reset_date=$(echo "$saved_data" | cut -d: -f3)
+    else
+        reset_date=$today
+    fi
+    
+    # 如果是新的一天，重置流量
+    if [ "$reset_date" != "$today" ]; then
+        saved_bytes=0
+        reset_date=$today
+        # 重置iptables计数
+        iptables -Z GOST_TRAFFIC 2>/dev/null
+    fi
+    
+    # 计算总流量
+    local total_bytes=$((saved_bytes + current_bytes))
+    
+    # 更新数据库
+    grep -v "^$port:" "$TRAFFIC_DB" > "${TRAFFIC_DB}.tmp" 2>/dev/null
+    echo "$port:$total_bytes:$reset_date" >> "${TRAFFIC_DB}.tmp"
+    mv "${TRAFFIC_DB}.tmp" "$TRAFFIC_DB"
+    
+    echo $total_bytes
+}
+
+# 检查流量限制
+check_traffic_limit() {
+    [ ! -f "$LIMITS_FILE" ] && return
     
     while IFS=: read -r port limit_gb; do
+        [ -z "$port" ] && continue
+        
         if [ "$limit_gb" != "无限制" ] && [ "$limit_gb" -gt 0 ]; then
-            # 使用 vnstat 或 /proc/net/dev 获取网络流量
-            local today_bytes=0
+            # 更新并获取流量
+            local total_bytes=$(update_traffic_stats $port)
+            local total_gb=$(echo "scale=2; $total_bytes / 1073741824" | bc)
             
-            # 从 vnstat 获取今日流量
-            if command -v vnstat >/dev/null; then
-                local vnstat_today=$(vnstat -i eth0 --json | grep -o '"today":[^}]*' | grep -o '"rx":[0-9]*' | cut -d: -f2)
-                local vnstat_today_tx=$(vnstat -i eth0 --json | grep -o '"today":[^}]*' | grep -o '"tx":[0-9]*' | cut -d: -f2)
-                today_bytes=$((vnstat_today + vnstat_today_tx))
+            # 检查是否超限
+            if (( $(echo "$total_gb >= $limit_gb" | bc -l) )); then
+                # 阻止端口
+                iptables -C INPUT -p tcp --dport $port -j DROP 2>/dev/null || \
+                    iptables -I INPUT -p tcp --dport $port -j DROP
+                iptables -C INPUT -p udp --dport $port -j DROP 2>/dev/null || \
+                    iptables -I INPUT -p udp --dport $port -j DROP
+                    
+                echo "[$(date)] Port $port blocked - Traffic: ${total_gb}GB / Limit: ${limit_gb}GB" >> "$LOG_FILE"
             else
-                # 使用网络接口统计
-                local net_rx=$(cat /sys/class/net/*/statistics/rx_bytes 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
-                local net_tx=$(cat /sys/class/net/*/statistics/tx_bytes 2>/dev/null | awk '{sum+=$1} END {print sum+0}')
-                today_bytes=$((net_rx + net_tx))
-            fi
-            
-            # 简化算法：按端口比例分配流量
-            local port_connections=$(netstat -an | grep ":${port} " | wc -l)
-            local total_connections=$(netstat -an | grep ESTABLISHED | wc -l)
-            
-            if [ "$total_connections" -gt 0 ]; then
-                local port_traffic=$((today_bytes * port_connections / total_connections))
-            else
-                local port_traffic=0
-            fi
-            
-            # 转换为GB
-            local port_traffic_gb=$((port_traffic / 1073741824))
-            
-            # 记录使用情况
-            echo "${current_date}:${port}:${port_traffic}" >> "$USAGE_FILE"
-            
-            if [ "$port_traffic_gb" -ge "$limit_gb" ]; then
-                # 阻止该端口
-                iptables -I INPUT -p tcp --dport $port -j DROP 2>/dev/null
-                iptables -I INPUT -p udp --dport $port -j DROP 2>/dev/null
-                iptables -I FORWARD -p tcp --dport $port -j DROP 2>/dev/null
-                iptables -I FORWARD -p udp --dport $port -j DROP 2>/dev/null
-                
-                echo "$(date): 端口 $port 已达流量限制 ${limit_gb}GB，已暂停服务" >> /var/log/gost.log
+                # 确保端口未被阻止
+                iptables -D INPUT -p tcp --dport $port -j DROP 2>/dev/null
+                iptables -D INPUT -p udp --dport $port -j DROP 2>/dev/null
             fi
         fi
-    done < "$LIMITS_FILE" 2>/dev/null
+    done < "$LIMITS_FILE"
 }
 
+# 获取端口流量（供显示用）
+get_traffic() {
+    local port=$1
+    local data=$(grep "^$port:" "$TRAFFIC_DB" 2>/dev/null | tail -1)
+    
+    if [ -n "$data" ]; then
+        local bytes=$(echo "$data" | cut -d: -f2)
+        echo $bytes
+    else
+        echo 0
+    fi
+}
+
+# 重置端口流量
 reset_port() {
     local port=$1
-    # 移除阻止规则
+    
+    # 清除iptables规则
     iptables -D INPUT -p tcp --dport $port -j DROP 2>/dev/null
     iptables -D INPUT -p udp --dport $port -j DROP 2>/dev/null
-    iptables -D FORWARD -p tcp --dport $port -j DROP 2>/dev/null
-    iptables -D FORWARD -p udp --dport $port -j DROP 2>/dev/null
     
-    # 清除今日使用记录
-    local current_date=$(date +%Y-%m-%d)
-    sed -i "/^${current_date}:${port}:/d" "$USAGE_FILE" 2>/dev/null
+    # 重置iptables计数
+    iptables -Z GOST_TRAFFIC 2>/dev/null
+    
+    # 清除流量记录
+    grep -v "^$port:" "$TRAFFIC_DB" > "${TRAFFIC_DB}.tmp" 2>/dev/null
+    mv "${TRAFFIC_DB}.tmp" "$TRAFFIC_DB"
+    
+    # 清除conntrack记录
+    conntrack -D -p tcp --dport $port 2>/dev/null
+    conntrack -D -p udp --dport $port 2>/dev/null
+    
+    echo "[$(date)] Port $port traffic reset" >> "$LOG_FILE"
 }
 
+# 主函数
 case "$1" in
-    check) check_and_limit ;;
-    reset) reset_port "$2" ;;
-    *) echo "用法: $0 {check|reset <port>}" ;;
+    init)
+        init_db
+        iptables -t filter -N GOST_TRAFFIC 2>/dev/null
+        ;;
+    add)
+        add_iptables_rules $2
+        ;;
+    check)
+        init_db
+        check_traffic_limit
+        ;;
+    get)
+        get_traffic $2
+        ;;
+    reset)
+        reset_port $2
+        ;;
+    *)
+        echo "Usage: $0 {init|add|check|get|reset} [port]"
+        ;;
 esac
 EOF
     
     chmod +x /usr/local/bin/gost-traffic-monitor.sh
     
-    # 设置每10分钟检查一次
-    echo "*/10 * * * * root /usr/local/bin/gost-traffic-monitor.sh check" > /etc/cron.d/gost-traffic
+    # 初始化
+    /usr/local/bin/gost-traffic-monitor.sh init
+    
+    # 设置定时任务（每分钟检查）
+    cat > /etc/cron.d/gost-traffic << 'EOF'
+# 每分钟检查流量限制
+* * * * * root /usr/local/bin/gost-traffic-monitor.sh check >/dev/null 2>&1
+EOF
+    
     systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null
     
     echo -e "${Info} 流量控制系统设置完成"
@@ -137,10 +258,10 @@ install_gost() {
     detect_environment
     
     if [[ $release == "centos" ]]; then
-        yum install -y wget curl >/dev/null 2>&1
+        yum install -y wget curl bc >/dev/null 2>&1
     else
         apt-get update >/dev/null 2>&1
-        apt-get install -y wget curl >/dev/null 2>&1
+        apt-get install -y wget curl bc >/dev/null 2>&1
     fi
     
     cd /tmp
@@ -181,27 +302,38 @@ create_shortcut() {
     echo -e "${Info} 创建快捷命令..."
     
     if is_oneclick_install; then
+        # 在线安装模式：下载脚本到本地
         if wget -q -O /usr/local/bin/gost-manager.sh "https://raw.githubusercontent.com/xmg0828-01/gost/main/gost.sh"; then
             chmod +x /usr/local/bin/gost-manager.sh
         else
+            # 备用方案：创建调用在线脚本的包装器
             cat > /usr/local/bin/gost-manager.sh << 'EOF'
 #!/bin/bash
-bash <(curl -sSL https://raw.githubusercontent.com/xmg0828-01/gost/main/gost.sh) --menu
+# 检查本地脚本是否存在
+if [ -f "/usr/local/bin/gost-local.sh" ]; then
+    /usr/local/bin/gost-local.sh "$@"
+else
+    # 调用在线脚本
+    bash <(curl -sSL https://raw.githubusercontent.com/xmg0828-01/gost/main/gost.sh) --menu
+fi
 EOF
             chmod +x /usr/local/bin/gost-manager.sh
         fi
     else
+        # 本地安装模式：直接复制
         cp "$0" /usr/local/bin/gost-manager.sh
         chmod +x /usr/local/bin/gost-manager.sh
     fi
     
+    # 创建软链接
     ln -sf /usr/local/bin/gost-manager.sh /usr/bin/g
     echo -e "${Info} 快捷命令 'g' 创建成功"
 }
 
 init_config() {
     mkdir -p /etc/gost
-    touch /etc/gost/{rawconf,remarks.txt,expires.txt,limits.txt,usage.log}
+    touch /etc/gost/{rawconf,remarks.txt,expires.txt,limits.txt}
+    [ ! -f "$traffic_path" ] && echo "# port:total_bytes:reset_date" > "$traffic_path"
     
     if [ ! -f "$gost_conf_path" ]; then
         cat > "$gost_conf_path" << 'EOF'
@@ -258,22 +390,16 @@ format_expire_date() {
 
 get_port_traffic() {
     local port=$1
-    local current_date=$(date +%Y-%m-%d)
-    local usage_file="/etc/gost/usage.log"
+    local bytes=$(/usr/local/bin/gost-traffic-monitor.sh get $port 2>/dev/null || echo "0")
     
-    if [ -f "$usage_file" ]; then
-        local bytes=$(grep "^${current_date}:${port}:" "$usage_file" | tail -1 | cut -d: -f3 | head -1)
-        bytes=${bytes:-0}
-        
-        if [ "$bytes" -gt 1073741824 ]; then
-            echo "$(( bytes / 1073741824 )) GB"
-        elif [ "$bytes" -gt 1048576 ]; then
-            echo "$(( bytes / 1048576 )) MB"
-        else
-            echo "$(( bytes / 1024 )) KB"
-        fi
-    else
+    if [ "$bytes" -eq 0 ]; then
         echo "0 KB"
+    elif [ "$bytes" -lt 1048576 ]; then
+        echo "$((bytes / 1024)) KB"
+    elif [ "$bytes" -lt 1073741824 ]; then
+        echo "$(echo "scale=1; $bytes / 1048576" | bc) MB"
+    else
+        echo "$(echo "scale=2; $bytes / 1073741824" | bc) GB"
     fi
 }
 
@@ -304,15 +430,17 @@ get_system_info() {
 }
 
 show_forwards_list() {
-    echo -e "${Blue_font_prefix}=================== 转发规则 ===================${Font_color_suffix}"
+    echo -e "${Blue_font_prefix}================================ 转发规则列表 ================================${Font_color_suffix}"
     if [ ! -f "$raw_conf_path" ] || [ ! -s "$raw_conf_path" ]; then
         echo -e "${Warning} 暂无转发规则"
         echo
         return
     fi
 
-    echo -e "${Green_font_prefix}ID\t端口\t目标地址\t\t备注\t\t到期\t\t限制\t\t今日已用\t状态${Font_color_suffix}"
-    echo "---------------------------------------------------------------------------------------------"
+    # 使用printf格式化表格，确保对齐
+    printf "${Green_font_prefix}%-4s %-8s %-20s %-12s %-10s %-10s %-10s %-8s${Font_color_suffix}\n" \
+        "ID" "端口" "目标地址" "备注" "到期" "限制" "已用" "状态"
+    echo -e "${Blue_font_prefix}------------------------------------------------------------------------------${Font_color_suffix}"
     
     local id=1
     while IFS= read -r line; do
@@ -326,7 +454,28 @@ show_forwards_list() {
         local traffic_used=$(get_port_traffic "$port")
         local port_status=$(check_port_blocked "$port")
         
-        printf "%d\t%s\t%s:%s\t\t%s\t\t%s\t%s\t\t%s\t\t%s\n" "$id" "$port" "$target" "$target_port" "$remark" "$expire_display" "$limit_info" "$traffic_used" "$port_status"
+        # 格式化限制信息
+        if [ "$limit_info" != "无限制" ]; then
+            limit_display="${limit_info}GB"
+        else
+            limit_display="$limit_info"
+        fi
+        
+        # 截断过长的内容
+        [ ${#remark} -gt 10 ] && remark="${remark:0:10}.."
+        [ ${#target} -gt 15 ] && target_display="${target:0:12}..." || target_display="$target"
+        
+        # 根据状态设置颜色
+        if [ "$port_status" = "已限制" ]; then
+            status_color="${Red_font_prefix}"
+        else
+            status_color="${Green_font_prefix}"
+        fi
+        
+        printf "%-4s %-8s %-20s %-12s %-10s %-10s %-10s ${status_color}%-8s${Font_color_suffix}\n" \
+            "$id" "$port" "${target_display}:${target_port}" "$remark" "$expire_display" \
+            "$limit_display" "$traffic_used" "$port_status"
+        
         ((id++))
     done < "$raw_conf_path"
     echo
@@ -390,12 +539,15 @@ add_forward_rule() {
     echo "${local_port}:${expire_timestamp}" >> "$expires_path"
     echo "${local_port}:${traffic_limit}" >> "$limits_path"
     
+    # 添加流量监控
+    /usr/local/bin/gost-traffic-monitor.sh add $local_port
+    
     rebuild_config
     echo -e "${Info} 转发规则已添加"
     echo -e "${Info} 端口: ${local_port} -> ${target_ip}:${target_port}"
     echo -e "${Info} 备注: ${remark:-无}"
     echo -e "${Info} 到期: $(format_expire_date "$expire_timestamp")"
-    echo -e "${Info} 限制: ${traffic_limit}GB/天"
+    echo -e "${Info} 限制: ${traffic_limit}$([ "$traffic_limit" != "无限制" ] && echo "GB/天")"
     sleep 3
 }
 
@@ -424,15 +576,16 @@ delete_forward_rule() {
     local port=$(echo "$line" | cut -d'/' -f2 | cut -d'#' -f1)
     
     # 清理iptables规则
+    iptables -D GOST_TRAFFIC -p tcp --dport $port 2>/dev/null
+    iptables -D GOST_TRAFFIC -p udp --dport $port 2>/dev/null
     iptables -D INPUT -p tcp --dport $port -j DROP 2>/dev/null
     iptables -D INPUT -p udp --dport $port -j DROP 2>/dev/null
-    iptables -D FORWARD -p tcp --dport $port -j DROP 2>/dev/null
-    iptables -D FORWARD -p udp --dport $port -j DROP 2>/dev/null
     
     sed -i "${rule_id}d" "$raw_conf_path"
     sed -i "/^${port}:/d" "$remarks_path" 2>/dev/null
     sed -i "/^${port}:/d" "$expires_path" 2>/dev/null
     sed -i "/^${port}:/d" "$limits_path" 2>/dev/null
+    sed -i "/^${port}:/d" "$traffic_path" 2>/dev/null
     
     rebuild_config
     echo -e "${Info} 规则已删除 (端口: ${port})"
@@ -549,19 +702,22 @@ system_management() {
             1) 
                 echo -e "${Info} 服务状态: $(systemctl is-active gost 2>/dev/null || echo '未运行')"
                 echo -e "${Info} 开机自启: $(systemctl is-enabled gost 2>/dev/null || echo '未设置')"
-                echo -e "${Info} 流量控制: $([ -f /usr/local/bin/gost-traffic-monitor.sh ] && echo '已启用(每10分钟检查)' || echo '未启用')"
+                echo -e "${Info} 流量控制: $([ -f /usr/local/bin/gost-traffic-monitor.sh ] && echo '已启用(每分钟检查)' || echo '未启用')"
+                echo -e "${Info} 防火墙链: $(iptables -L GOST_TRAFFIC >/dev/null 2>&1 && echo '正常' || echo '未创建')"
                 read -p "按Enter继续..."
                 ;;
             2) systemctl start gost && echo -e "${Info} 服务已启动" && sleep 2 ;;
             3) systemctl stop gost && echo -e "${Info} 服务已停止" && sleep 2 ;;
             4) systemctl restart gost && echo -e "${Info} 服务已重启" && sleep 2 ;;
             5)
-                echo -e "${Info} 流量监控日志:"
-                if [ -f /var/log/gost.log ]; then
-                    tail -20 /var/log/gost.log
+                echo -e "${Info} 流量监控日志 (最近20条):"
+                echo -e "${Blue_font_prefix}=================================================${Font_color_suffix}"
+                if [ -f /var/log/gost-traffic.log ]; then
+                    tail -20 /var/log/gost-traffic.log
                 else
                     echo "暂无日志记录"
                 fi
+                echo -e "${Blue_font_prefix}=================================================${Font_color_suffix}"
                 read -p "按Enter继续..."
                 ;;
             6)
@@ -569,6 +725,8 @@ system_management() {
                 if [[ $confirm =~ ^[Yy]$ ]]; then
                     systemctl stop gost 2>/dev/null
                     systemctl disable gost 2>/dev/null
+                    iptables -F GOST_TRAFFIC 2>/dev/null
+                    iptables -X GOST_TRAFFIC 2>/dev/null
                     rm -f /usr/bin/gost /etc/systemd/system/gost.service /usr/bin/g
                     rm -rf /etc/gost /usr/local/bin/gost-manager.sh /usr/local/bin/gost-traffic-monitor.sh
                     rm -f /etc/cron.d/gost-traffic
@@ -633,4 +791,5 @@ main() {
     esac
 }
 
+# 执行主函数
 main "$@"
