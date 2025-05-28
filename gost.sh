@@ -36,9 +36,14 @@ detect_environment() {
     esac
 }
 
+# 检查是否为一键安装模式
+is_oneclick_install() {
+    [[ "$0" =~ /dev/fd/ ]] || [[ "$0" == "bash" ]] || [[ "$0" =~ /proc/self/fd/ ]]
+}
+
 # 一键安装GOST
-one_click_install() {
-    echo -e "${Info} 开始一键安装GOST..."
+install_gost() {
+    echo -e "${Info} 开始安装GOST..."
     
     detect_environment
     
@@ -52,8 +57,12 @@ one_click_install() {
     
     # 下载GOST
     cd /tmp
-    if ! wget -q -O gost.gz "https://github.com/ginuerzh/gost/releases/download/v${ct_new_ver}/gost-linux-${arch}-${ct_new_ver}.gz"; then
-        wget -q -O gost.gz "https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${ct_new_ver}/gost-linux-${arch}-${ct_new_ver}.gz"
+    if ! wget -q --timeout=10 -O gost.gz "https://github.com/ginuerzh/gost/releases/download/v${ct_new_ver}/gost-linux-${arch}-${ct_new_ver}.gz"; then
+        echo -e "${Info} 使用镜像源下载..."
+        if ! wget -q --timeout=10 -O gost.gz "https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${ct_new_ver}/gost-linux-${arch}-${ct_new_ver}.gz"; then
+            echo -e "${Error} GOST下载失败"
+            exit 1
+        fi
     fi
     
     gunzip gost.gz
@@ -79,31 +88,52 @@ EOF
     systemctl daemon-reload
     systemctl enable gost
     
-    # 初始化配置
+    echo -e "${Info} GOST安装完成"
+}
+
+# 创建快捷命令
+create_shortcut() {
+    echo -e "${Info} 创建快捷命令..."
+    
+    # 将当前脚本保存到系统路径
+    if is_oneclick_install; then
+        # 如果是一键安装，需要重新下载脚本
+        if wget -q -O /usr/local/bin/gost-manager.sh "https://raw.githubusercontent.com/xmg0828-01/gost/main/gost.sh"; then
+            chmod +x /usr/local/bin/gost-manager.sh
+        else
+            # 下载失败，创建一个调用远程脚本的本地脚本
+            cat > /usr/local/bin/gost-manager.sh << 'EOF'
+#!/bin/bash
+bash <(curl -sSL https://raw.githubusercontent.com/xmg0828-01/gost/main/gost.sh) --menu
+EOF
+            chmod +x /usr/local/bin/gost-manager.sh
+        fi
+    else
+        # 如果是本地脚本，直接复制
+        cp "$0" /usr/local/bin/gost-manager.sh
+        chmod +x /usr/local/bin/gost-manager.sh
+    fi
+    
+    # 创建快捷命令
+    ln -sf /usr/local/bin/gost-manager.sh /usr/bin/g
+    
+    echo -e "${Info} 快捷命令 'g' 创建成功"
+}
+
+# 初始化配置目录
+init_config() {
     mkdir -p /etc/gost
     touch /etc/gost/{rawconf,traffic.log,remarks.txt}
     
-    cat > /etc/gost/config.json << 'EOF'
+    if [ ! -f "$gost_conf_path" ]; then
+        cat > "$gost_conf_path" << 'EOF'
 {
     "Debug": false,
     "Retries": 0,
     "ServeNodes": []
 }
 EOF
-    
-    # 创建快捷命令
-    cp "$0" /usr/local/bin/gost-manager.sh 2>/dev/null || {
-        cat > /usr/local/bin/gost-manager.sh << 'SCRIPT_END'
-#!/bin/bash
-bash <(curl -sSL https://raw.githubusercontent.com/xmg0828-01/gost/main/gost.sh) --local
-SCRIPT_END
-    }
-    
-    chmod +x /usr/local/bin/gost-manager.sh
-    ln -sf /usr/local/bin/gost-manager.sh /usr/bin/g
-    
-    echo -e "${Info} GOST安装完成！使用 'g' 命令打开管理面板"
-    sleep 2
+    fi
 }
 
 # 显示标题
@@ -442,16 +472,33 @@ main_menu() {
 main() {
     check_root
     
-    # 检测是否为一键安装
-    if [[ "$0" =~ /dev/fd/ ]] || [[ "$0" == "bash" ]] || [[ ! -f "/usr/bin/gost" && "$1" != "--local" ]]; then
-        one_click_install
-    fi
-    
-    # 确保目录存在
-    mkdir -p /etc/gost
-    touch /etc/gost/{rawconf,traffic.log,remarks.txt}
-    
-    main_menu
+    case "${1:-}" in
+        --menu)
+            # 直接进入菜单，不安装
+            init_config
+            main_menu
+            ;;
+        *)
+            # 检查是否需要安装
+            if ! command -v gost >/dev/null 2>&1; then
+                echo -e "${Info} 检测到GOST未安装，开始安装..."
+                install_gost
+                create_shortcut
+                init_config
+                echo -e "${Info} 安装完成！现在可以使用 'g' 命令打开管理面板"
+                echo -e "${Info} 正在打开管理面板..."
+                sleep 2
+                main_menu
+            else
+                # 已安装，检查是否需要创建快捷命令
+                if [ ! -f "/usr/bin/g" ]; then
+                    create_shortcut
+                fi
+                init_config
+                main_menu
+            fi
+            ;;
+    esac
 }
 
 # 运行主程序
