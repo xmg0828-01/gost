@@ -42,11 +42,23 @@ is_oneclick_install() {
 setup_traffic_control() {
     echo -e "${Info} 设置流量控制系统..."
     
-    if [[ $release == "centos" ]]; then
-        yum install -y iptables iptables-services conntrack-tools bc >/dev/null 2>&1
-        systemctl enable iptables >/dev/null 2>&1
-    else
-        apt-get install -y iptables iptables-persistent conntrack bc >/dev/null 2>&1
+    # 检查必要的命令是否已存在
+    local need_install=0
+    command -v iptables >/dev/null 2>&1 || need_install=1
+    command -v bc >/dev/null 2>&1 || need_install=1
+    
+    if [ "$need_install" -eq 1 ]; then
+        echo -e "${Info} 安装必要的依赖包..."
+        if [[ $release == "centos" ]]; then
+            timeout 60 yum install -y iptables bc >/dev/null 2>&1 || {
+                echo -e "${Warning} 依赖包安装超时，尝试继续..."
+            }
+        else
+            # 跳过 apt-get update 以加快速度
+            timeout 60 apt-get install -y iptables bc >/dev/null 2>&1 || {
+                echo -e "${Warning} 依赖包安装超时，尝试继续..."
+            }
+        fi
     fi
     
     # 创建精确的流量监控脚本
