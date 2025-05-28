@@ -165,34 +165,49 @@ get_system_info() {
     echo
 }
 
-# 获取总流量 - 使用简单的数学计算
+# 获取总流量 - 简化版本
 get_total_traffic() {
-    # 尝试从系统网络接口获取流量信息
-    if [ -f /proc/net/dev ]; then
-        # 获取所有网络接口的流量（排除lo回环接口）
-        local rx_bytes=$(awk '!/lo:/ && /:/ {rx+=$2} END {print rx+0}' /proc/net/dev 2>/dev/null || echo "0")
-        local tx_bytes=$(awk '!/lo:/ && /:/ {tx+=$10} END {print tx+0}' /proc/net/dev 2>/dev/null || echo "0")
-        local total_bytes=$((rx_bytes + tx_bytes))
+    # 方法1：尝试读取网络统计
+    if [ -r /proc/net/dev ]; then
+        # 读取所有非lo接口的流量
+        local total_rx=$(awk '!/lo:/ && /:/ {sum += $2} END {print sum+0}' /proc/net/dev 2>/dev/null)
+        local total_tx=$(awk '!/lo:/ && /:/ {sum += $10} END {print sum+0}' /proc/net/dev 2>/dev/null)
         
-        # 使用shell内置的数学运算，避免bc依赖
-        if [ "$total_bytes" -gt 1073741824 ]; then
-            local gb=$((total_bytes / 1073741824))
-            local remainder=$((total_bytes % 1073741824))
-            local decimal=$((remainder * 10 / 1073741824))
-            echo "${gb}.${decimal} GB"
-        elif [ "$total_bytes" -gt 1048576 ]; then
-            local mb=$((total_bytes / 1048576))
-            echo "${mb} MB"
-        elif [ "$total_bytes" -gt 1024 ]; then
-            local kb=$((total_bytes / 1024))
-            echo "${kb} KB"
-        elif [ "$total_bytes" -gt 0 ]; then
-            echo "${total_bytes} B"
-        else
-            echo "0 KB"
+        if [ -n "$total_rx" ] && [ -n "$total_tx" ] && [ "$total_rx" -gt 0 -o "$total_tx" -gt 0 ]; then
+            local total_bytes=$((total_rx + total_tx))
+            
+            if [ "$total_bytes" -gt 1073741824 ]; then
+                echo "$((total_bytes / 1073741824)) GB"
+            elif [ "$total_bytes" -gt 1048576 ]; then
+                echo "$((total_bytes / 1048576)) MB"
+            elif [ "$total_bytes" -gt 1024 ]; then
+                echo "$((total_bytes / 1024)) KB"
+            else
+                echo "${total_bytes} B"
+            fi
+            return
         fi
+    fi
+    
+    # 方法2：如果上面失败，显示磁盘使用量作为参考
+    if command -v df >/dev/null 2>&1; then
+        local disk_used=$(df / 2>/dev/null | awk 'NR==2 {print $3}' | head -1)
+        if [ -n "$disk_used" ] && [ "$disk_used" -gt 0 ]; then
+            if [ "$disk_used" -gt 1048576 ]; then
+                echo "$((disk_used / 1048576)) GB (磁盘)"
+            else
+                echo "$((disk_used / 1024)) MB (磁盘)"
+            fi
+            return
+        fi
+    fi
+    
+    # 方法3：显示系统负载作为活动指示
+    if [ -r /proc/loadavg ]; then
+        local load=$(awk '{print $1}' /proc/loadavg 2>/dev/null)
+        echo "${load:-0} (负载)"
     else
-        echo "0 KB"
+        echo "N/A"
     fi
 }
 
