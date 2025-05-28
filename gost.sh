@@ -158,40 +158,30 @@ get_system_info() {
     fi
     
     active_rules=$(wc -l < "$raw_conf_path" 2>/dev/null || echo "0")
-    
-    # 获取实时连接数
-    local total_connections=0
-    if [ -f "$raw_conf_path" ] && [ -s "$raw_conf_path" ]; then
-        while IFS= read -r line; do
-            local port=$(echo "$line" | cut -d'/' -f2 | cut -d'#' -f1)
-            if command -v ss >/dev/null 2>&1; then
-                local port_conn=$(ss -tun | grep ":$port " | wc -l)
-                total_connections=$((total_connections + port_conn))
-            fi
-        done < "$raw_conf_path"
-    fi
-    
-    # 显示系统负载
-    local load_avg=""
-    if [ -f /proc/loadavg ]; then
-        load_avg=$(awk '{print $1}' /proc/loadavg)
-    fi
+    total_traffic=$(get_total_traffic)
     
     echo -e "${Info} 服务状态: ${gost_status} | 版本: ${gost_version}"
-    echo -e "${Info} 活跃规则: ${active_rules} | 总连接数: ${total_connections} | 系统负载: ${load_avg:-未知}"
+    echo -e "${Info} 活跃规则: ${active_rules} | 总流量: ${total_traffic}"
     echo
 }
 
-# 获取总流量
+# 获取总流量 - 改为显示网络接口流量
 get_total_traffic() {
-    if [ -f "$traffic_log_path" ] && [ -s "$traffic_log_path" ]; then
-        total_bytes=$(awk '{sum+=$3} END {print sum+0}' "$traffic_log_path")
+    # 尝试从系统网络接口获取流量信息
+    if [ -f /proc/net/dev ]; then
+        # 获取主网络接口的流量
+        local rx_bytes=$(awk '/eth0|ens|enp|wlan/ {rx+=$2} END {print rx+0}' /proc/net/dev)
+        local tx_bytes=$(awk '/eth0|ens|enp|wlan/ {tx+=$10} END {print tx+0}' /proc/net/dev)
+        local total_bytes=$((rx_bytes + tx_bytes))
+        
         if [ "$total_bytes" -gt 1073741824 ]; then
-            echo "$(( total_bytes / 1073741824 )) GB"
+            echo "$(echo "scale=2; $total_bytes/1073741824" | bc 2>/dev/null || echo $((total_bytes/1073741824))) GB"
         elif [ "$total_bytes" -gt 1048576 ]; then
-            echo "$(( total_bytes / 1048576 )) MB"
+            echo "$(echo "scale=1; $total_bytes/1048576" | bc 2>/dev/null || echo $((total_bytes/1048576))) MB"
+        elif [ "$total_bytes" -gt 1024 ]; then
+            echo "$(echo "scale=0; $total_bytes/1024" | bc 2>/dev/null || echo $((total_bytes/1024))) KB"
         else
-            echo "$(( total_bytes / 1024 )) KB"
+            echo "${total_bytes} B"
         fi
     else
         echo "0 KB"
@@ -229,114 +219,58 @@ show_forwards_list() {
     echo
 }
 
-# 记录流量数据
-log_traffic() {
-    local port=$1
-    local bytes=$2
-    local timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-    echo "$timestamp $port $bytes" >> "$traffic_log_path"
-}
-
-# 获取端口流量统计
-get_port_traffic() {
-    local port=$1
-    
-    # 获取网络统计数据
-    if command -v ss >/dev/null 2>&1; then
-        # 获取端口连接数
-        local connections=$(ss -tuln | grep ":$port " | wc -l)
-        
-        # 通过iptables获取流量（如果有的话）
-        if command -v iptables >/dev/null 2>&1; then
-            local bytes=$(iptables -L -n -v -x 2>/dev/null | grep ":$port" | awk '{sum+=$2} END {print sum+0}')
-            if [ "$bytes" -gt 0 ]; then
-                log_traffic "$port" "$bytes"
-            fi
-        fi
-        
-        echo "$connections"
-    else
-        echo "0"
-    fi
-}
-
-# 更新所有端口流量
-update_traffic_stats() {
-    if [ -f "$raw_conf_path" ] && [ -s "$raw_conf_path" ]; then
-        while IFS= read -r line; do
-            local port=$(echo "$line" | cut -d'/' -f2 | cut -d'#' -f1)
-            get_port_traffic "$port" >/dev/null
-        done < "$raw_conf_path"
-    fi
-}
-
 # 显示流量统计
 show_traffic_stats() {
     echo -e "${Blue_font_prefix}==================== 流量统计 ====================${Font_color_suffix}"
     
-    # 更新流量统计
-    update_traffic_stats
+    # 显示系统网络统计信息
+    echo -e "${Green_font_prefix}端口\t连接数\t状态\t\t\t目标地址\t\t\t备注${Font_color_suffix}"
+    echo "--------------------------------------------------------------------------------"
     
-    if [ ! -f "$raw_conf_path" ] || [ ! -s "$raw_conf_path" ]; then
+    if [ -f "$raw_conf_path" ] && [ -s "$raw_conf_path" ]; then
+        while IFS= read -r line; do
+            local port=$(echo "$line" | cut -d'/' -f2 | cut -d'#' -f1)
+            local target=$(echo "$line" | cut -d'#' -f2)
+            local target_port=$(echo "$line" | cut -d'#' -f3)
+            local remark=$(grep "^${port}:" "$remarks_path" 2>/dev/null | cut -d':' -f2- || echo "无备注")
+            
+            # 获取端口连接数
+            local connections=$(ss -tuln 2>/dev/null | grep ":${port} " | wc -l || echo "0")
+            
+            # 检查端口状态
+            local status="监听中"
+            if [ "$connections" -eq 0 ]; then
+                if netstat -tuln 2>/dev/null | grep -q ":${port} "; then
+                    status="监听中"
+                else
+                    status="未监听"
+                fi
+            fi
+            
+            printf "%s\t%s\t\t%s\t\t\t%s:%s\t\t\t%s\n" "$port" "$connections" "$status" "$target" "$target_port" "$remark"
+        done < "$raw_conf_path"
+    else
         echo -e "${Warning} 暂无转发规则"
-        echo
-        return
     fi
-
-    echo -e "${Green_font_prefix}端口\t连接数\t状态\t\t目标地址\t\t备注${Font_color_suffix}"
-    echo "----------------------------------------------------------------"
-    
-    while IFS= read -r line; do
-        local port=$(echo "$line" | cut -d'/' -f2 | cut -d'#' -f1)
-        local target=$(echo "$line" | cut -d'#' -f2)
-        local target_port=$(echo "$line" | cut -d'#' -f3)
-        local remark=$(grep "^${port}:" "$remarks_path" 2>/dev/null | cut -d':' -f2- || echo "无备注")
-        
-        # 检查端口是否在监听
-        local status="未知"
-        local connections="0"
-        
-        if command -v ss >/dev/null 2>&1; then
-            if ss -tuln | grep -q ":$port "; then
-                status="监听中"
-                connections=$(ss -tuln | grep ":$port " | wc -l)
-            else
-                status="未监听"
-            fi
-        elif command -v netstat >/dev/null 2>&1; then
-            if netstat -tuln | grep -q ":$port "; then
-                status="监听中"
-                connections=$(netstat -tuln | grep ":$port " | wc -l)
-            else
-                status="未监听"
-            fi
-        fi
-        
-        # 获取活跃连接数
-        if command -v ss >/dev/null 2>&1; then
-            local active_conn=$(ss -tun | grep ":$port " | wc -l)
-            [ "$active_conn" -gt 0 ] && connections="$active_conn"
-        fi
-        
-        printf "%s\t%s\t\t%s\t\t%s:%s\t\t%s\n" "$port" "$connections" "$status" "$target" "$target_port" "$remark"
-    done < "$raw_conf_path"
     
     echo
-    echo -e "${Info} 实时流量监控信息："
-    echo -e "  - 连接数：当前活跃的网络连接数量"
-    echo -e "  - 状态：端口是否正在监听"
-    echo -e "  - 监听中：转发规则正常工作"
-    echo -e "  - 未监听：可能服务未启动或配置有误"
+    echo -e "${Info} 实时流量监控信息:"
+    echo -e "  - 连接数: 当前活跃的网络连接数量"
+    echo -e "  - 状态: 端口是否正在监听"
+    echo -e "  - 监听中: 转发规则正常工作"
+    echo -e "  - 未监听: 可能服务未启动或配置有误"
     echo
+    echo -e "${Info} 系统网络概况:"
     
-    # 显示系统网络统计
+    # 显示总体网络统计
     if command -v ss >/dev/null 2>&1; then
-        echo -e "${Info} 系统网络概况："
-        local total_tcp=$(ss -t | grep -c ESTAB)
-        local total_udp=$(ss -u | wc -l)
-        echo -e "  - TCP连接数：$total_tcp"
-        echo -e "  - UDP连接数：$total_udp"
+        local tcp_connections=$(ss -t 2>/dev/null | grep ESTAB | wc -l || echo "0")
+        local udp_connections=$(ss -u 2>/dev/null | wc -l || echo "0")
+        echo -e "  - TCP连接数: $tcp_connections"
+        echo -e "  - UDP连接数: $udp_connections"
     fi
+    
+    echo
 }
 
 # 添加转发规则
