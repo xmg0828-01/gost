@@ -201,18 +201,65 @@ install_gost() {
     
     # 下载GOST
     cd /tmp
+    rm -f gost.gz gost 2>/dev/null
     echo -e "${Info} 下载GOST程序..."
-    if ! wget -q --timeout=30 -O gost.gz "https://github.com/ginuerzh/gost/releases/download/v${version_to_install}/gost-linux-${arch}-${version_to_install}.gz"; then
-        echo -e "${Info} 使用镜像源下载..."
-        if ! wget -q --timeout=30 -O gost.gz "https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${version_to_install}/gost-linux-${arch}-${version_to_install}.gz"; then
-            echo -e "${Error} GOST下载失败"
+    
+    local download_url="https://github.com/ginuerzh/gost/releases/download/v${version_to_install}/gost-linux-${arch}-${version_to_install}.gz"
+    local mirror_url="https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${version_to_install}/gost-linux-${arch}-${version_to_install}.gz"
+    
+    # 尝试官方源
+    if wget -q --timeout=30 --show-progress -O gost.gz "$download_url"; then
+        echo -e "${Info} 从官方源下载成功"
+    elif wget -q --timeout=30 --show-progress -O gost.gz "$mirror_url"; then
+        echo -e "${Info} 从镜像源下载成功"
+    else
+        echo -e "${Error} 下载失败，尝试其他方式..."
+        # 使用curl尝试
+        if curl -L --connect-timeout 30 -o gost.gz "$download_url" || curl -L --connect-timeout 30 -o gost.gz "$mirror_url"; then
+            echo -e "${Info} 使用curl下载成功"
+        else
+            echo -e "${Error} 所有下载方式都失败了"
             exit 1
         fi
     fi
     
-    gunzip gost.gz
+    # 检查下载的文件
+    if [ ! -f "gost.gz" ] || [ ! -s "gost.gz" ]; then
+        echo -e "${Error} 下载的文件为空或不存在"
+        exit 1
+    fi
+    
+    # 检查文件类型
+    if file gost.gz | grep -q "gzip"; then
+        echo -e "${Info} 文件格式正确，开始解压..."
+        if ! gunzip gost.gz; then
+            echo -e "${Error} 解压失败"
+            exit 1
+        fi
+    else
+        echo -e "${Error} 下载的文件不是gzip格式"
+        echo -e "${Info} 文件内容预览:"
+        head -5 gost.gz
+        exit 1
+    fi
+    
+    # 检查解压后的文件
+    if [ ! -f "gost" ]; then
+        echo -e "${Error} 解压后找不到gost文件"
+        exit 1
+    fi
+    
     chmod +x gost
     mv gost /usr/bin/gost
+    
+    # 验证安装
+    if command -v gost >/dev/null 2>&1; then
+        local installed_version=$(gost -V 2>/dev/null | awk '{print $2}' || echo "未知")
+        echo -e "${Info} GOST安装成功，版本: $installed_version"
+    else
+        echo -e "${Error} GOST安装失败"
+        exit 1
+    fi
     
     # 创建systemd服务
     cat > /etc/systemd/system/gost.service << 'EOF'
