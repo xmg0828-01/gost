@@ -1,15 +1,13 @@
 #!/bin/bash
-# GOST 简化版管理脚本 v2.3.1（完整可运行）
+# GOST 简化版管理脚本 v2.3.2（完整）
 # 功能：一键安装/更新 GOST、systemd 管理、转发规则维护、到期清理、快捷命令 g
-# 说明：全脚本均为英文直引号，已处理 if/fi 配对与 sed 正则问题
 
 Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Yellow_font_prefix="\033[33m"
 Blue_font_prefix="\033[34m" && Font_color_suffix="\033[0m"
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
 Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warning="${Yellow_font_prefix}[警告]${Font_color_suffix}"
-shell_version="2.3.1"
-# 若查询最新版本失败，将回退到此版本：
+shell_version="2.3.2"
 fallback_gost_ver="2.11.5"
 
 gost_conf_path="/etc/gost/config.json"
@@ -17,9 +15,7 @@ raw_conf_path="/etc/gost/rawconf"
 remarks_path="/etc/gost/remarks.txt"
 expires_path="/etc/gost/expires.txt"
 
-check_root() {
-  [[ $EUID != 0 ]] && echo -e "${Error} 请使用 root 权限运行此脚本" && exit 1
-}
+check_root() { [[ $EUID != 0 ]] && echo -e "${Error} 请使用 root 权限运行此脚本" && exit 1; }
 
 detect_environment() {
   if [[ -f /etc/redhat-release ]]; then
@@ -37,63 +33,59 @@ detect_environment() {
 }
 
 get_latest_gost_ver() {
-  # 取 GitHub 最新版 tag（如 v2.11.5），失败返回 fallback
   local v
-  v=$(curl -m 6 -fsSL https://api.github.com/repos/ginuerzh/gost/releases/latest \
+  v=$(curl -m 8 -fsSL https://api.github.com/repos/ginuerzh/gost/releases/latest \
       | grep -oE '"tag_name"\s*:\s*"v[0-9\.]+"' | head -n1 | sed 's/[^0-9\.]//g')
-  if [[ -n "$v" ]]; then
-    echo "$v"
-  else
-    echo "$fallback_gost_ver"
-  fi
+  [[ -n "$v" ]] && echo "$v" || echo "$fallback_gost_ver"
 }
 
-is_oneclick_install() {
-  [[ "$0" =~ /dev/fd/ ]] || [[ "$0" == "bash" ]] || [[ "$0" =~ /proc/self/fd/ ]]
-}
+is_oneclick_install() { [[ "$0" =~ /dev/fd/ ]] || [[ "$0" == "bash" ]] || [[ "$0" =~ /proc/self/fd/ ]]; }
 
 ensure_deps() {
   detect_environment
   if [[ $release == "centos" ]]; then
     yum install -y wget curl gzip tar cronie >/dev/null 2>&1
     systemctl enable crond >/dev/null 2>&1 || true
-    systemctl start crond >/dev/null 2>&1 || true
+    systemctl start crond  >/dev/null 2>&1 || true
   else
     apt-get update -y >/dev/null 2>&1
     apt-get install -y wget curl gzip cron >/dev/null 2>&1
     systemctl enable cron >/dev/null 2>&1 || true
-    systemctl start cron >/dev/null 2>&1 || true
+    systemctl start cron  >/dev/null 2>&1 || true
   fi
 }
 
 download_gost() {
-  # 参数：$1=版本号（如 2.11.5）
+  # $1=version
   local ver="$1"
-  local main_url="https://github.com/ginuerzh/gost/releases/download/v${ver}/gost-linux-${arch}-${ver}.gz"
-  local mirror_url="https://mirror.ghproxy.com/${main_url}"
-  cd /tmp || exit 1
-  echo -e "${Info} 下载 GOST v${ver} (${arch}) ..."
-  if ! wget -q --timeout=30 -O gost.gz "$main_url"; then
-    echo -e "${Warning} 主源失败，尝试镜像源..."
-    if ! wget -q --timeout=30 -O gost.gz "$mirror_url"; then
-      echo -e "${Error} GOST v${ver} 下载失败"
-      return 1
+  local urls=(
+    "https://github.com/ginuerzh/gost/releases/download/v${ver}/gost-linux-${arch}-${ver}.gz"
+    "https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${ver}/gost-linux-${arch}-${ver}.gz"
+    "https://ghproxy.net/https://github.com/ginuerzh/gost/releases/download/v${ver}/gost-linux-${arch}-${ver}.gz"
+  )
+  cd /tmp || return 1
+  rm -f /tmp/gost.gz /tmp/gost
+  local ok=""
+  for u in "${urls[@]}"; do
+    echo -e "${Info} 尝试下载：$u"
+    if curl -fL --retry 3 -o /tmp/gost.gz "$u"; then
+      if gzip -t /tmp/gost.gz 2>/dev/null; then ok="1"; break
+      else echo -e "${Warning} 文件不是有效的 gzip，换源重试..."; fi
     fi
-  fi
-  gunzip -f gost.gz
-  chmod +x gost
-  mv -f gost /usr/bin/gost
+  done
+  [ -z "$ok" ] && { echo -e "${Error} GOST v${ver} 下载失败"; return 1; }
+  gunzip -f /tmp/gost.gz
+  install -m 0755 /tmp/gost /usr/bin/gost
   return 0
 }
 
 install_gost() {
   ensure_deps
   mkdir -p /etc/gost
-  local ver
-  ver=$(get_latest_gost_ver)
+  local ver; ver=$(get_latest_gost_ver)
+  echo -e "${Info} 安装 GOST v${ver} ..."
   download_gost "$ver" || { echo -e "${Error} 安装失败"; exit 1; }
 
-  # systemd 服务
   cat > /etc/systemd/system/gost.service << 'SERVICE'
 [Unit]
 Description=GOST
@@ -112,7 +104,6 @@ SERVICE
   systemctl daemon-reload
   systemctl enable gost >/dev/null 2>&1
 
-  # 到期检查脚本
   cat > /usr/local/bin/gost-expire-check.sh << 'CHK'
 #!/bin/bash
 EXPIRES_FILE="/etc/gost/expires.txt"
@@ -121,10 +112,8 @@ GOST_CONF="/etc/gost/config.json"
 REMARKS="/etc/gost/remarks.txt"
 
 [ ! -f "$EXPIRES_FILE" ] && exit 0
-
 current_time=$(date +%s)
 expired_ports=""
-
 while IFS=: read -r port expire_date; do
   [ -z "$port" ] && continue
   if [ "$expire_date" != "永久" ] && [ "$expire_date" -lt "$current_time" ] 2>/dev/null; then
@@ -144,7 +133,6 @@ fi
 CHK
   chmod +x /usr/local/bin/gost-expire-check.sh
 
-  # 每日 02:00 执行
   echo "0 2 * * * root /usr/local/bin/gost-expire-check.sh >/dev/null 2>&1" > /etc/cron.d/gost-expire
   systemctl restart cron 2>/dev/null || systemctl restart crond 2>/dev/null
 
@@ -153,16 +141,11 @@ CHK
 
 update_gost() {
   ensure_deps
-  local ver
-  ver=$(get_latest_gost_ver)
+  local ver; ver=$(get_latest_gost_ver)
   echo -e "${Info} 准备更新到 GOST v${ver} ..."
-  if download_gost "$ver"; then
-    systemctl restart gost >/dev/null 2>&1 || true
-    echo -e "${Info} 已更新到 v${ver}"
-  else
-    echo -e "${Error} 更新失败"
-    exit 1
-  fi
+  download_gost "$ver" || { echo -e "${Error} 更新失败"; exit 1; }
+  systemctl restart gost >/dev/null 2>&1 || true
+  echo -e "${Info} 已更新到 v${ver}"
 }
 
 create_shortcut() {
@@ -200,8 +183,7 @@ show_header() {
 }
 
 check_expired_rules() {
-  local expired_count=0
-  local current_date
+  local expired_count=0 current_date
   current_date=$(date +%s)
   if [ -f "$expires_path" ]; then
     while IFS=: read -r port expire_date; do
@@ -254,7 +236,6 @@ show_forwards_list() {
   fi
   printf "%-4s %-10s %-25s %-15s %-12s\n" "ID" "端口" "目标地址" "备注" "到期时间"
   echo -e "${Blue_font_prefix}----------------------------------------------------------------${Font_color_suffix}"
-
   local id=1
   while IFS= read -r line; do
     [ -z "$line" ] && continue
@@ -269,7 +250,6 @@ show_forwards_list() {
     expire_display=$(format_expire_date "$expire_info")
     [ ${#remark} -gt 13 ] && remark="${remark:0:13}.."
     [ ${#target} -gt 15 ] && target_display="${target:0:12}..." || target_display="$target"
-
     if [ "$expire_display" = "已过期" ]; then
       expire_color="${Red_font_prefix}"
     elif [ "$expire_display" = "今天到期" ]; then
@@ -290,12 +270,8 @@ add_forward_rule() {
   read -rp "目标 IP 地址: " target_ip
   read -rp "目标端口: " target_port
   read -rp "备注信息 (可选): " remark
-
-  echo -e "${Info} 设置到期时间:"
-  echo "1) 永久有效"
-  echo "2) 自定义天数"
+  echo -e "${Info} 设置到期时间:\n1) 永久有效\n2) 自定义天数"
   read -rp "请选择 [1-2]: " expire_choice
-
   local expire_timestamp="永久"
   if [ "$expire_choice" = "2" ]; then
     read -rp "请输入有效天数: " days
@@ -307,18 +283,15 @@ add_forward_rule() {
       expire_timestamp="永久"
     fi
   fi
-
   if [[ ! $local_port =~ ^[0-9]+$ ]] || [[ ! $target_port =~ ^[0-9]+$ ]]; then
-    echo -e "${Error} 端口必须为数字"; sleep 2; return
+    echo -e "${Error} 端口必须为数字"; sleep 1; return
   fi
   if grep -q "/${local_port}#" "$raw_conf_path" 2>/dev/null; then
-    echo -e "${Error} 端口 $local_port 已被使用"; sleep 2; return
+    echo -e "${Error} 端口 $local_port 已被使用"; sleep 1; return
   fi
-
   echo "nonencrypt/${local_port}#${target_ip}#${target_port}" >> "$raw_conf_path"
   [ -n "$remark" ] && echo "${local_port}:${remark}" >> "$remarks_path"
   echo "${local_port}:${expire_timestamp}" >> "$expires_path"
-
   rebuild_config
   echo -e "${Info} 规则已添加：${local_port} -> ${target_ip}:${target_port}"
   echo -e "${Info} 到期：$(format_expire_date "$expire_timestamp")"
@@ -326,20 +299,12 @@ add_forward_rule() {
 }
 
 delete_forward_rule() {
-  if [ ! -s "$raw_conf_path" ]; then
-    echo -e "${Warning} 暂无转发规则"; sleep 1; return
-  fi
+  if [ ! -s "$raw_conf_path" ]; then echo -e "${Warning} 暂无转发规则"; sleep 1; return; fi
   read -rp "请输入要删除的规则 ID: " rule_id
-  if ! [[ $rule_id =~ ^[0-9]+$ ]] || [ "$rule_id" -lt 1 ]; then
-    echo -e "${Error} 无效的规则 ID"; sleep 1; return
-  fi
-  local line
-  line=$(sed -n "${rule_id}p" "$raw_conf_path")
-  if [ -z "$line" ]; then
-    echo -e "${Error} 规则 ID 不存在"; sleep 1; return
-  fi
-  local port
-  port=$(echo "$line" | cut -d'/' -f2 | cut -d'#' -f1)
+  if ! [[ $rule_id =~ ^[0-9]+$ ]] || [ "$rule_id" -lt 1 ]; then echo -e "${Error} 无效的规则 ID"; sleep 1; return; fi
+  local line; line=$(sed -n "${rule_id}p" "$raw_conf_path")
+  if [ -z "$line" ]; then echo -e "${Error} 规则 ID 不存在"; sleep 1; return; fi
+  local port; port=$(echo "$line" | cut -d'/' -f2 | cut -d'#' -f1)
   sed -i "${rule_id}d" "$raw_conf_path"
   sed -i "/^${port}:/d" "$remarks_path" 2>/dev/null
   sed -i "/^${port}:/d" "$expires_path" 2>/dev/null
@@ -354,8 +319,7 @@ rebuild_config() {
   else
     {
       echo '{"Debug":false,"Retries":0,"ServeNodes":['
-      local i=1 count_line
-      count_line=$(wc -l < "$raw_conf_path")
+      local i=1 count_line; count_line=$(wc -l < "$raw_conf_path")
       while IFS= read -r line; do
         [ -z "$line" ] && continue
         local port target target_port
@@ -363,11 +327,7 @@ rebuild_config() {
         target=$(echo "$line" | cut -d'#' -f2)
         target_port=$(echo "$line" | cut -d'#' -f3)
         printf '        "tcp://:%s/%s:%s","udp://:%s/%s:%s"' "$port" "$target" "$target_port" "$port" "$target" "$target_port"
-        if [ "$i" -lt "$count_line" ]; then
-          echo ","
-        else
-          echo
-        fi
+        if [ "$i" -lt "$count_line" ]; then echo ","; else echo; fi
         ((i++))
       done < "$raw_conf_path"
       echo "    ]}"
