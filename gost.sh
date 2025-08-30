@@ -62,16 +62,20 @@ get_latest_version() {
 update_gost() {
     echo -e "${Info} 开始更新GOST..."
     
-    # 检查当前版本
-    local current_version
-    if command -v gost >/dev/null 2>&1; then
-        current_version=$(gost -V 2>/dev/null | awk '{print $2}' | sed 's/v//')
-        echo -e "${Info} 当前版本: ${current_version:-未知}"
-    else
+    # 检查GOST是否已安装
+    if ! command -v gost >/dev/null 2>&1; then
         echo -e "${Error} GOST未安装，请先安装"
         sleep 2
         return
     fi
+    
+    # 检查当前版本
+    local current_version
+    current_version=$(gost -V 2>/dev/null | awk '{print $2}' | sed 's/v//')
+    if [ -z "$current_version" ]; then
+        current_version=$(gost --version 2>/dev/null | awk '{print $2}' | sed 's/v//')
+    fi
+    echo -e "${Info} 当前版本: ${current_version:-未知}"
     
     # 获取最新版本
     local latest_version=$(get_latest_version)
