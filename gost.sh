@@ -1,54 +1,4 @@
-# 更新GOST程序
-update_gost() {
-    echo -e "${Info} 开始更新GOST..."
-    
-    # 检查GOST是否已安装
-    if ! command -v gost >/dev/null 2>&1; then
-        echo -e "${Error} GOST未安装，请先安装"
-        sleep 2
-        return
-    fi
-    
-    # 检查当前版本
-    local current_version
-    current_version=$(gost -V 2>/dev/null | awk '{print $2}' | sed 's/v//')
-    if [ -z "$current_version" ]; then
-        current_version=$(gost --version 2>/dev/null | awk '{print $2}' | sed 's/v//')
-    fi
-    echo -e "${Info} 当前版本: ${current_version:-未知}"
-    
-    # 使用固定的稳定版本而不是自动获取最新版本
-    local target_version="$ct_new_ver"
-    echo -e "${Info} 目标版本: $target_version"
-    
-    # 版本比较
-    if [ "$current_version" = "$target_version" ]; then
-        echo -e "${Info} 当前已是目标版本，无需更新"
-        sleep 2
-        return
-    fi
-    
-    echo -e "${Warning} 准备更新: $current_version -> $target_version"
-    read -p "是否确认更新？(y/N): " confirm
-    if [[ ! $confirm =~ ^[Yy]$ ]]; then
-        echo -e "${Info} 取消更新"
-        sleep 2
-        return
-    fi
-    
-    detect_environment
-    
-    # 停止服务
-    echo -e "${Info} 停止GOST服务..."
-    systemctl stop gost
-    
-    # 备份当前版本
-    echo -e "${Info} 备份当前版本..."
-    cp /usr/bin/gost /usr/bin/gost.backup.$(date +%Y%m%d_%H%M%S)
-    
-    # 下载新版本 - 使用与安装函数相同的逻辑
-    cd /tmp
-    echo -e "${Info} 下载GOST v${target_version}..."#!/bin/bash
+#!/bin/bash
 # GOST 简化版管理脚本 v2.3.1 - 仅包含到期管理功能 + 更新功能
 # 一键安装: bash <(curl -sSL https://raw.githubusercontent.com/xmg0828-01/gost/main/gost.sh)
 # 快捷使用: g
@@ -87,59 +37,33 @@ is_oneclick_install() {
     [[ "$0" =~ /dev/fd/ ]] || [[ "$0" == "bash" ]] || [[ "$0" =~ /proc/self/fd/ ]]
 }
 
-# 获取最新版本号
-get_latest_version() {
-    local latest_version
-    echo -e "${Info} 检查最新版本..."
-    
-    # 尝试从GitHub API获取最新版本
-    latest_version=$(curl -s --connect-timeout 10 "https://api.github.com/repos/ginuerzh/gost/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/v//')
-    
-    if [ -z "$latest_version" ]; then
-        # 如果GitHub API失败，尝试镜像源
-        latest_version=$(curl -s --connect-timeout 10 "https://mirror.ghproxy.com/https://api.github.com/repos/ginuerzh/gost/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/v//')
-    fi
-    
-    if [ -z "$latest_version" ]; then
-        echo -e "${Warning} 无法获取最新版本信息，使用默认版本 ${ct_new_ver}"
-        latest_version="$ct_new_ver"
-    fi
-    
-    echo "$latest_version"
-}
-
-# 更新GOST程序
+# 新增：更新GOST程序
 update_gost() {
     echo -e "${Info} 开始更新GOST..."
     
-    # 检查GOST是否已安装
     if ! command -v gost >/dev/null 2>&1; then
-        echo -e "${Error} GOST未安装，请先安装"
+        echo -e "${Error} GOST未安装"
         sleep 2
         return
     fi
     
-    # 检查当前版本
-    local current_version
-    current_version=$(gost -V 2>/dev/null | awk '{print $2}' | sed 's/v//')
-    if [ -z "$current_version" ]; then
-        current_version=$(gost --version 2>/dev/null | awk '{print $2}' | sed 's/v//')
-    fi
+    local current_version=$(gost -V 2>/dev/null | awk '{print $2}' | sed 's/v//')
     echo -e "${Info} 当前版本: ${current_version:-未知}"
     
     # 获取最新版本
-    local latest_version=$(get_latest_version)
+    local latest_version=$(curl -s "https://api.github.com/repos/ginuerzh/gost/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/v//')
+    if [ -z "$latest_version" ]; then
+        latest_version="2.12.0"  # 备用版本
+    fi
     echo -e "${Info} 最新版本: $latest_version"
     
-    # 版本比较
     if [ "$current_version" = "$latest_version" ]; then
-        echo -e "${Info} 当前已是最新版本，无需更新"
+        echo -e "${Info} 已是最新版本"
         sleep 2
         return
     fi
     
-    echo -e "${Warning} 发现新版本: $current_version -> $latest_version"
-    read -p "是否确认更新？(y/N): " confirm
+    read -p "是否更新到 v${latest_version}？(y/N): " confirm
     if [[ ! $confirm =~ ^[Yy]$ ]]; then
         echo -e "${Info} 取消更新"
         sleep 2
@@ -147,86 +71,25 @@ update_gost() {
     fi
     
     detect_environment
-    
-    # 停止服务
-    echo -e "${Info} 停止GOST服务..."
     systemctl stop gost
-    
-    # 备份当前版本
-    echo -e "${Info} 备份当前版本..."
     cp /usr/bin/gost /usr/bin/gost.backup.$(date +%Y%m%d_%H%M%S)
     
-    # 下载新版本
     cd /tmp
-    echo -e "${Info} 下载GOST v${latest_version}..."
+    echo -e "${Info} 下载新版本..."
     
-    if ! wget -q --timeout=30 -O gost.gz "https://github.com/ginuerzh/gost/releases/download/v${latest_version}/gost-linux-${arch}-${latest_version}.gz"; then
-        echo -e "${Info} 使用镜像源下载..."
-        if ! wget -q --timeout=30 -O gost.gz "https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${latest_version}/gost-linux-${arch}-${latest_version}.gz"; then
-            echo -e "${Error} 下载失败，恢复服务..."
+    if wget -q --timeout=30 -O gost.gz "https://github.com/ginuerzh/gost/releases/download/v${latest_version}/gost-linux-${arch}-${latest_version}.gz" || \
+       wget -q --timeout=30 -O gost.gz "https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${latest_version}/gost-linux-${arch}-${latest_version}.gz"; then
+        
+        if gunzip gost.gz && chmod +x gost && mv gost /usr/bin/gost; then
             systemctl start gost
-            sleep 2
-            return
-        fi
-    fi
-    
-    # 解压安装
-    echo -e "${Info} 安装新版本..."
-    if gunzip gost.gz && chmod +x gost && mv gost /usr/bin/gost; then
-        # 启动服务
-        echo -e "${Info} 启动GOST服务..."
-        systemctl start gost
-        
-        # 验证更新
-        local new_version=$(gost -V 2>/dev/null | awk '{print $2}' | sed 's/v//')
-        if [ "$new_version" = "$latest_version" ]; then
-            echo -e "${Info} 更新成功! 版本: $current_version -> $new_version"
-            # 更新脚本中的默认版本号
-            ct_new_ver="$latest_version"
+            echo -e "${Info} 更新成功!"
         else
-            echo -e "${Warning} 更新可能未完全成功，当前版本: ${new_version:-未知}"
+            echo -e "${Error} 更新失败"
+            systemctl start gost
         fi
     else
-        echo -e "${Error} 安装失败，恢复服务..."
+        echo -e "${Error} 下载失败"
         systemctl start gost
-    fi
-    
-    sleep 3
-}
-
-# 更新脚本自身
-update_script() {
-    echo -e "${Info} 开始更新管理脚本..."
-    
-    if is_oneclick_install; then
-        echo -e "${Info} 检查脚本更新..."
-        local temp_script="/tmp/gost_new.sh"
-        
-        if wget -q --timeout=30 -O "$temp_script" "https://raw.githubusercontent.com/xmg0828-01/gost/main/gost.sh"; then
-            local new_version=$(grep 'shell_version=' "$temp_script" | head -1 | cut -d'"' -f2)
-            echo -e "${Info} 远程版本: ${new_version:-未知}"
-            echo -e "${Info} 当前版本: $shell_version"
-            
-            if [ "$new_version" != "$shell_version" ] && [ -n "$new_version" ]; then
-                read -p "发现新版本，是否更新脚本？(y/N): " confirm
-                if [[ $confirm =~ ^[Yy]$ ]]; then
-                    chmod +x "$temp_script"
-                    cp "$temp_script" /usr/local/bin/gost-manager.sh
-                    echo -e "${Info} 脚本更新完成！重新启动管理面板..."
-                    sleep 2
-                    exec /usr/local/bin/gost-manager.sh --menu
-                fi
-            else
-                echo -e "${Info} 脚本已是最新版本"
-            fi
-        else
-            echo -e "${Error} 无法检查脚本更新"
-        fi
-        
-        rm -f "$temp_script"
-    else
-        echo -e "${Warning} 本地模式无法自动更新脚本"
-        echo -e "${Info} 请手动下载最新版本或使用在线安装方式"
     fi
     
     sleep 2
@@ -355,7 +218,7 @@ show_header() {
     echo -e "${Blue_font_prefix}======================================================${Font_color_suffix}"
     echo -e "${Green_font_prefix}          GOST 简化版管理面板 v${shell_version}${Font_color_suffix}"
     echo -e "${Blue_font_prefix}======================================================${Font_color_suffix}"
-    echo -e "${Yellow_font_prefix}功能: 转发管理 | 到期时间 | 备注信息 | 更新功能${Font_color_suffix}"
+    echo -e "${Yellow_font_prefix}功能: 转发管理 | 到期时间 | 备注信息${Font_color_suffix}"
     echo -e "${Blue_font_prefix}======================================================${Font_color_suffix}"
     echo
 }
@@ -599,97 +462,24 @@ system_management() {
         echo -e "${Green_font_prefix}3.${Font_color_suffix} 停止GOST服务"
         echo -e "${Green_font_prefix}4.${Font_color_suffix} 重启GOST服务"
         echo -e "${Green_font_prefix}5.${Font_color_suffix} 更新GOST程序"
-        echo -e "${Green_font_prefix}6.${Font_color_suffix} 修复GOST配置"
-        echo -e "${Green_font_prefix}7.${Font_color_suffix} 更新管理脚本"
-        echo -e "${Green_font_prefix}8.${Font_color_suffix} 卸载GOST"
+        echo -e "${Green_font_prefix}6.${Font_color_suffix} 卸载GOST"
         echo -e "${Green_font_prefix}0.${Font_color_suffix} 返回主菜单"
         echo
-        read -p "请选择操作 [0-8]: " choice
+        read -p "请选择操作: " choice
         
         case $choice in
             1) 
-                echo -e "${Info} === GOST服务详细状态 ==="
-                local service_status=$(systemctl is-active gost 2>/dev/null)
-                local service_enabled=$(systemctl is-enabled gost 2>/dev/null)
-                
-                echo -e "${Info} 服务状态: ${service_status:-未安装}"
-                echo -e "${Info} 开机自启: ${service_enabled:-未设置}"
+                echo -e "${Info} 服务状态: $(systemctl is-active gost 2>/dev/null || echo '未运行')"
+                echo -e "${Info} 开机自启: $(systemctl is-enabled gost 2>/dev/null || echo '未设置')"
                 echo -e "${Info} 配置文件: $gost_conf_path"
                 echo -e "${Info} 规则文件: $raw_conf_path"
-                
-                # 检查GOST程序是否存在
-                if command -v gost >/dev/null 2>&1; then
-                    local gost_version=$(gost -V 2>/dev/null | awk '{print $2}' || echo "获取失败")
-                    echo -e "${Info} GOST版本: $gost_version"
-                    echo -e "${Info} GOST路径: $(which gost)"
-                else
-                    echo -e "${Warning} GOST程序未找到，需要安装"
-                fi
-                
-                # 如果服务有问题，显示日志
-                if [ "$service_status" = "failed" ] || [ "$service_status" = "activating" ]; then
-                    echo -e "${Warning} 服务状态异常，显示最近日志："
-                    journalctl -u gost --no-pager -n 10
-                fi
-                
-                # 检查配置文件
-                if [ -f "$gost_conf_path" ]; then
-                    echo -e "${Info} 配置文件存在"
-                    if [ -s "$gost_conf_path" ]; then
-                        echo -e "${Info} 配置文件不为空"
-                    else
-                        echo -e "${Warning} 配置文件为空"
-                    fi
-                else
-                    echo -e "${Warning} 配置文件不存在"
-                fi
-                
                 read -p "按Enter继续..."
                 ;;
             2) systemctl start gost && echo -e "${Info} 服务已启动" && sleep 2 ;;
             3) systemctl stop gost && echo -e "${Info} 服务已停止" && sleep 2 ;;
             4) systemctl restart gost && echo -e "${Info} 服务已重启" && sleep 2 ;;
-            5) 
-                if ! command -v gost >/dev/null 2>&1; then
-                    echo -e "${Info} GOST未安装，开始安装..."
-                    install_gost
-                    echo -e "${Info} 安装完成!"
-                    sleep 2
-                else
-                    update_gost
-                fi
-                ;;
-            6) 
-                echo -e "${Info} 修复GOST配置文件..."
-                # 检查并修复配置文件
-                if [ -f "$gost_conf_path" ]; then
-                    echo -e "${Info} 备份当前配置..."
-                    cp "$gost_conf_path" "${gost_conf_path}.backup.$(date +%Y%m%d_%H%M%S)"
-                fi
-                
-                # 重建配置文件
-                echo -e "${Info} 重建配置文件..."
-                rebuild_config
-                
-                # 测试配置
-                echo -e "${Info} 测试配置文件..."
-                if gost -C "$gost_conf_path" -L tcp://:0 2>/dev/null; then
-                    echo -e "${Info} 配置文件格式正确"
-                    systemctl restart gost
-                    sleep 2
-                    local new_status=$(systemctl is-active gost)
-                    if [ "$new_status" = "active" ]; then
-                        echo -e "${Info} GOST服务修复成功！"
-                    else
-                        echo -e "${Warning} 服务仍有问题，请检查日志"
-                    fi
-                else
-                    echo -e "${Error} 配置文件仍有问题"
-                fi
-                sleep 3
-                ;;
-            7) update_script ;;
-            8)
+            5) update_gost ;;
+            6)
                 read -p "确认卸载GOST？(y/N): " confirm
                 if [[ $confirm =~ ^[Yy]$ ]]; then
                     systemctl stop gost 2>/dev/null
