@@ -1,13 +1,15 @@
 #!/bin/bash
-# GOST 简化版管理脚本 v2.3.2（完整）
+# GOST 简化版管理脚本 v2.3.3（完整）
 # 功能：一键安装/更新 GOST、systemd 管理、转发规则维护、到期清理、快捷命令 g
+# 特性：自动获取可用 tag、支持多镜像下载、下载后验证 gzip、失败自动切换与回退版本
 
 Green_font_prefix="\033[32m" && Red_font_prefix="\033[31m" && Yellow_font_prefix="\033[33m"
 Blue_font_prefix="\033[34m" && Font_color_suffix="\033[0m"
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
 Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warning="${Yellow_font_prefix}[警告]${Font_color_suffix}"
-shell_version="2.3.2"
+shell_version="2.3.3"
+# 如果无法从 GitHub 获取可用版本，回退到此稳定版
 fallback_gost_ver="2.11.5"
 
 gost_conf_path="/etc/gost/config.json"
@@ -32,10 +34,18 @@ detect_environment() {
   esac
 }
 
+# —— 获取“可用”的最新版本：先尝试 releases/latest，失败就从 tags 取第一项，再不行回退 fallback ——
 get_latest_gost_ver() {
   local v
-  v=$(curl -m 8 -fsSL https://api.github.com/repos/ginuerzh/gost/releases/latest \
+  # 1) releases/latest
+  v=$(curl -m 6 -fsSL https://api.github.com/repos/ginuerzh/gost/releases/latest \
       | grep -oE '"tag_name"\s*:\s*"v[0-9\.]+"' | head -n1 | sed 's/[^0-9\.]//g')
+  # 2) tags 列表
+  if [[ -z "$v" ]]; then
+    v=$(curl -m 6 -fsSL https://api.github.com/repos/ginuerzh/gost/tags \
+        | grep -oE '"name"\s*:\s*"v[0-9\.]+"' | head -n1 | sed 's/[^0-9\.]//g')
+  fi
+  # 3) 回退
   [[ -n "$v" ]] && echo "$v" || echo "$fallback_gost_ver"
 }
 
@@ -55,28 +65,47 @@ ensure_deps() {
   fi
 }
 
+# —— 多镜像下载 + gzip 校验；若失败，用 tags 的最新版本再试；最后仍失败则报错 ——
 download_gost() {
-  # $1=version
   local ver="$1"
-  local urls=(
-    "https://github.com/ginuerzh/gost/releases/download/v${ver}/gost-linux-${arch}-${ver}.gz"
-    "https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${ver}/gost-linux-${arch}-${ver}.gz"
-    "https://ghproxy.net/https://github.com/ginuerzh/gost/releases/download/v${ver}/gost-linux-${arch}-${ver}.gz"
-  )
-  cd /tmp || return 1
-  rm -f /tmp/gost.gz /tmp/gost
-  local ok=""
-  for u in "${urls[@]}"; do
-    echo -e "${Info} 尝试下载：$u"
-    if curl -fL --retry 3 -o /tmp/gost.gz "$u"; then
-      if gzip -t /tmp/gost.gz 2>/dev/null; then ok="1"; break
-      else echo -e "${Warning} 文件不是有效的 gzip，换源重试..."; fi
+  local try_ver="$ver"
+  local urls=()
+
+  attempt_download() {
+    urls=(
+      "https://github.com/ginuerzh/gost/releases/download/v${try_ver}/gost-linux-${arch}-${try_ver}.gz"
+      "https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${try_ver}/gost-linux-${arch}-${try_ver}.gz"
+      "https://ghproxy.net/https://github.com/ginuerzh/gost/releases/download/v${try_ver}/gost-linux-${arch}-${try_ver}.gz"
+    )
+    cd /tmp || return 1
+    rm -f /tmp/gost.gz /tmp/gost
+    local ok=""
+    for u in "${urls[@]}"; do
+      echo -e "${Info} 尝试下载：$u"
+      if curl -fL --retry 3 -o /tmp/gost.gz "$u"; then
+        if gzip -t /tmp/gost.gz 2>/dev/null; then ok="1"; break
+        else echo -e "${Warning} 不是有效 gzip，换源重试..."; fi
+      fi
+    done
+    if [[ -n "$ok" ]]; then
+      gunzip -f /tmp/gost.gz
+      install -m 0755 /tmp/gost /usr/bin/gost
+      return 0
     fi
-  done
-  [ -z "$ok" ] && { echo -e "${Error} GOST v${ver} 下载失败"; return 1; }
-  gunzip -f /tmp/gost.gz
-  install -m 0755 /tmp/gost /usr/bin/gost
-  return 0
+    return 1
+  }
+
+  # 先按传入版本尝试
+  if attempt_download; then return 0; fi
+
+  # 再用 tags 的最新版本兜底
+  echo -e "${Warning} 可能为无效版本或限流，改用 tags 列表最新版本重试..."
+  try_ver=$(curl -m 6 -fsSL https://api.github.com/repos/ginuerzh/gost/tags \
+          | grep -oE '"name"\s*:\s*"v[0-9\.]+"' | head -n1 | sed 's/[^0-9\.]//g')
+  if [[ -n "$try_ver" ]] && attempt_download; then return 0; fi
+
+  echo -e "${Error} GOST v${ver} 下载失败"
+  return 1
 }
 
 install_gost() {
