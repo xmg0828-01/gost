@@ -553,12 +553,16 @@ system_management() {
         echo -e "${Green_font_prefix}2.${Font_color_suffix} 启动GOST服务"
         echo -e "${Green_font_prefix}3.${Font_color_suffix} 停止GOST服务"
         echo -e "${Green_font_prefix}4.${Font_color_suffix} 重启GOST服务"
-        echo -e "${Green_font_prefix}5.${Font_color_suffix} 安装/更新GOST程序"
+        if ! command -v gost >/dev/null 2>&1; then
+            echo -e "${Green_font_prefix}5.${Font_color_suffix} 安装GOST程序"
+        else
+            echo -e "${Green_font_prefix}5.${Font_color_suffix} 更新GOST程序"
+        fi
         echo -e "${Green_font_prefix}6.${Font_color_suffix} 更新管理脚本"
         echo -e "${Green_font_prefix}7.${Font_color_suffix} 卸载GOST"
         echo -e "${Green_font_prefix}0.${Font_color_suffix} 返回主菜单"
         echo
-        read -p "请选择操作: " choice
+        read -p "请选择操作 [0-7]: " choice
         
         case $choice in
             1) 
