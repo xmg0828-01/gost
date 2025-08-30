@@ -191,75 +191,23 @@ install_gost() {
     if [[ $release == "centos" ]]; then
         yum install -y wget curl >/dev/null 2>&1
     else
-        apt-get update >/dev/null 2>&1
         apt-get install -y wget curl >/dev/null 2>&1
     fi
     
-    # 获取最新版本号
-    local version_to_install=$(get_latest_version)
-    echo -e "${Info} 将安装版本: $version_to_install"
-    
     # 下载GOST
     cd /tmp
-    rm -f gost.gz gost 2>/dev/null
     echo -e "${Info} 下载GOST程序..."
-    
-    local download_url="https://github.com/ginuerzh/gost/releases/download/v${version_to_install}/gost-linux-${arch}-${version_to_install}.gz"
-    local mirror_url="https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${version_to_install}/gost-linux-${arch}-${version_to_install}.gz"
-    
-    # 尝试官方源
-    if wget -q --timeout=30 --show-progress -O gost.gz "$download_url"; then
-        echo -e "${Info} 从官方源下载成功"
-    elif wget -q --timeout=30 --show-progress -O gost.gz "$mirror_url"; then
-        echo -e "${Info} 从镜像源下载成功"
-    else
-        echo -e "${Error} 下载失败，尝试其他方式..."
-        # 使用curl尝试
-        if curl -L --connect-timeout 30 -o gost.gz "$download_url" || curl -L --connect-timeout 30 -o gost.gz "$mirror_url"; then
-            echo -e "${Info} 使用curl下载成功"
-        else
-            echo -e "${Error} 所有下载方式都失败了"
+    if ! wget -q --timeout=30 -O gost.gz "https://github.com/ginuerzh/gost/releases/download/v${ct_new_ver}/gost-linux-${arch}-${ct_new_ver}.gz"; then
+        echo -e "${Info} 使用镜像源下载..."
+        if ! wget -q --timeout=30 -O gost.gz "https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${ct_new_ver}/gost-linux-${arch}-${ct_new_ver}.gz"; then
+            echo -e "${Error} GOST下载失败"
             exit 1
         fi
     fi
     
-    # 检查下载的文件
-    if [ ! -f "gost.gz" ] || [ ! -s "gost.gz" ]; then
-        echo -e "${Error} 下载的文件为空或不存在"
-        exit 1
-    fi
-    
-    # 检查文件类型
-    if file gost.gz | grep -q "gzip"; then
-        echo -e "${Info} 文件格式正确，开始解压..."
-        if ! gunzip gost.gz; then
-            echo -e "${Error} 解压失败"
-            exit 1
-        fi
-    else
-        echo -e "${Error} 下载的文件不是gzip格式"
-        echo -e "${Info} 文件内容预览:"
-        head -5 gost.gz
-        exit 1
-    fi
-    
-    # 检查解压后的文件
-    if [ ! -f "gost" ]; then
-        echo -e "${Error} 解压后找不到gost文件"
-        exit 1
-    fi
-    
+    gunzip gost.gz
     chmod +x gost
     mv gost /usr/bin/gost
-    
-    # 验证安装
-    if command -v gost >/dev/null 2>&1; then
-        local installed_version=$(gost -V 2>/dev/null | awk '{print $2}' || echo "未知")
-        echo -e "${Info} GOST安装成功，版本: $installed_version"
-    else
-        echo -e "${Error} GOST安装失败"
-        exit 1
-    fi
     
     # 创建systemd服务
     cat > /etc/systemd/system/gost.service << 'EOF'
@@ -613,10 +561,42 @@ system_management() {
         
         case $choice in
             1) 
-                echo -e "${Info} 服务状态: $(systemctl is-active gost 2>/dev/null || echo '未运行')"
-                echo -e "${Info} 开机自启: $(systemctl is-enabled gost 2>/dev/null || echo '未设置')"
+                echo -e "${Info} === GOST服务详细状态 ==="
+                local service_status=$(systemctl is-active gost 2>/dev/null)
+                local service_enabled=$(systemctl is-enabled gost 2>/dev/null)
+                
+                echo -e "${Info} 服务状态: ${service_status:-未安装}"
+                echo -e "${Info} 开机自启: ${service_enabled:-未设置}"
                 echo -e "${Info} 配置文件: $gost_conf_path"
                 echo -e "${Info} 规则文件: $raw_conf_path"
+                
+                # 检查GOST程序是否存在
+                if command -v gost >/dev/null 2>&1; then
+                    local gost_version=$(gost -V 2>/dev/null | awk '{print $2}' || echo "获取失败")
+                    echo -e "${Info} GOST版本: $gost_version"
+                    echo -e "${Info} GOST路径: $(which gost)"
+                else
+                    echo -e "${Warning} GOST程序未找到，需要安装"
+                fi
+                
+                # 如果服务有问题，显示日志
+                if [ "$service_status" = "failed" ] || [ "$service_status" = "activating" ]; then
+                    echo -e "${Warning} 服务状态异常，显示最近日志："
+                    journalctl -u gost --no-pager -n 10
+                fi
+                
+                # 检查配置文件
+                if [ -f "$gost_conf_path" ]; then
+                    echo -e "${Info} 配置文件存在"
+                    if [ -s "$gost_conf_path" ]; then
+                        echo -e "${Info} 配置文件不为空"
+                    else
+                        echo -e "${Warning} 配置文件为空"
+                    fi
+                else
+                    echo -e "${Warning} 配置文件不存在"
+                fi
+                
                 read -p "按Enter继续..."
                 ;;
             2) systemctl start gost && echo -e "${Info} 服务已启动" && sleep 2 ;;
