@@ -553,7 +553,7 @@ system_management() {
         echo -e "${Green_font_prefix}2.${Font_color_suffix} 启动GOST服务"
         echo -e "${Green_font_prefix}3.${Font_color_suffix} 停止GOST服务"
         echo -e "${Green_font_prefix}4.${Font_color_suffix} 重启GOST服务"
-        echo -e "${Green_font_prefix}5.${Font_color_suffix} 更新GOST程序"
+        echo -e "${Green_font_prefix}5.${Font_color_suffix} 安装/更新GOST程序"
         echo -e "${Green_font_prefix}6.${Font_color_suffix} 更新管理脚本"
         echo -e "${Green_font_prefix}7.${Font_color_suffix} 卸载GOST"
         echo -e "${Green_font_prefix}0.${Font_color_suffix} 返回主菜单"
@@ -571,7 +571,16 @@ system_management() {
             2) systemctl start gost && echo -e "${Info} 服务已启动" && sleep 2 ;;
             3) systemctl stop gost && echo -e "${Info} 服务已停止" && sleep 2 ;;
             4) systemctl restart gost && echo -e "${Info} 服务已重启" && sleep 2 ;;
-            5) update_gost ;;
+            5) 
+                if ! command -v gost >/dev/null 2>&1; then
+                    echo -e "${Info} GOST未安装，开始安装..."
+                    install_gost
+                    echo -e "${Info} 安装完成!"
+                    sleep 2
+                else
+                    update_gost
+                fi
+                ;;
             6) update_script ;;
             7)
                 read -p "确认卸载GOST？(y/N): " confirm
