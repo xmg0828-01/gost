@@ -1,5 +1,5 @@
 #!/bin/bash
-# GOST 简化版管理脚本 v2.3.1 - 仅包含到期管理功能 + 更新功能
+# GOST 简化版管理脚本 v2.3.0 - 仅包含到期管理功能
 # 一键安装: bash <(curl -sSL https://raw.githubusercontent.com/xmg0828-01/gost/main/gost.sh)
 # 快捷使用: g
 
@@ -8,7 +8,7 @@ Blue_font_prefix="\033[34m" && Font_color_suffix="\033[0m"
 Info="${Green_font_prefix}[信息]${Font_color_suffix}"
 Error="${Red_font_prefix}[错误]${Font_color_suffix}"
 Warning="${Yellow_font_prefix}[警告]${Font_color_suffix}"
-shell_version="2.3.1"
+shell_version="2.3.0"
 ct_new_ver="2.11.5"
 
 gost_conf_path="/etc/gost/config.json"
@@ -35,64 +35,6 @@ detect_environment() {
 
 is_oneclick_install() {
     [[ "$0" =~ /dev/fd/ ]] || [[ "$0" == "bash" ]] || [[ "$0" =~ /proc/self/fd/ ]]
-}
-
-# 新增：更新GOST程序
-update_gost() {
-    echo -e "${Info} 开始更新GOST..."
-    
-    if ! command -v gost >/dev/null 2>&1; then
-        echo -e "${Error} GOST未安装"
-        sleep 2
-        return
-    fi
-    
-    local current_version=$(gost -V 2>/dev/null | awk '{print $2}' | sed 's/v//')
-    echo -e "${Info} 当前版本: ${current_version:-未知}"
-    
-    # 获取最新版本
-    local latest_version=$(curl -s "https://api.github.com/repos/ginuerzh/gost/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/' | sed 's/v//')
-    if [ -z "$latest_version" ]; then
-        latest_version="2.12.0"  # 备用版本
-    fi
-    echo -e "${Info} 最新版本: $latest_version"
-    
-    if [ "$current_version" = "$latest_version" ]; then
-        echo -e "${Info} 已是最新版本"
-        sleep 2
-        return
-    fi
-    
-    read -p "是否更新到 v${latest_version}？(y/N): " confirm
-    if [[ ! $confirm =~ ^[Yy]$ ]]; then
-        echo -e "${Info} 取消更新"
-        sleep 2
-        return
-    fi
-    
-    detect_environment
-    systemctl stop gost
-    cp /usr/bin/gost /usr/bin/gost.backup.$(date +%Y%m%d_%H%M%S)
-    
-    cd /tmp
-    echo -e "${Info} 下载新版本..."
-    
-    if wget -q --timeout=30 -O gost.gz "https://github.com/ginuerzh/gost/releases/download/v${latest_version}/gost-linux-${arch}-${latest_version}.gz" || \
-       wget -q --timeout=30 -O gost.gz "https://mirror.ghproxy.com/https://github.com/ginuerzh/gost/releases/download/v${latest_version}/gost-linux-${arch}-${latest_version}.gz"; then
-        
-        if gunzip gost.gz && chmod +x gost && mv gost /usr/bin/gost; then
-            systemctl start gost
-            echo -e "${Info} 更新成功!"
-        else
-            echo -e "${Error} 更新失败"
-            systemctl start gost
-        fi
-    else
-        echo -e "${Error} 下载失败"
-        systemctl start gost
-    fi
-    
-    sleep 2
 }
 
 install_gost() {
@@ -461,8 +403,7 @@ system_management() {
         echo -e "${Green_font_prefix}2.${Font_color_suffix} 启动GOST服务"
         echo -e "${Green_font_prefix}3.${Font_color_suffix} 停止GOST服务"
         echo -e "${Green_font_prefix}4.${Font_color_suffix} 重启GOST服务"
-        echo -e "${Green_font_prefix}5.${Font_color_suffix} 更新GOST程序"
-        echo -e "${Green_font_prefix}6.${Font_color_suffix} 卸载GOST"
+        echo -e "${Green_font_prefix}5.${Font_color_suffix} 卸载GOST"
         echo -e "${Green_font_prefix}0.${Font_color_suffix} 返回主菜单"
         echo
         read -p "请选择操作: " choice
@@ -478,8 +419,7 @@ system_management() {
             2) systemctl start gost && echo -e "${Info} 服务已启动" && sleep 2 ;;
             3) systemctl stop gost && echo -e "${Info} 服务已停止" && sleep 2 ;;
             4) systemctl restart gost && echo -e "${Info} 服务已重启" && sleep 2 ;;
-            5) update_gost ;;
-            6)
+            5)
                 read -p "确认卸载GOST？(y/N): " confirm
                 if [[ $confirm =~ ^[Yy]$ ]]; then
                     systemctl stop gost 2>/dev/null
